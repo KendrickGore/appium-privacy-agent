@@ -50,7 +50,7 @@ class AppiumTools:
     1. get_page_info() 使用 page_source + XML 解析，避免逐个 get_attribute 导致卡死；
     2. clickable_elements 支持 nearby_text；
     3. click_by_id() 使用 bounds 中心点点击，适合无文字图标和整行 FrameLayout；
-    4. 开关识别使用严格 class 判断，避免误判普通控件。
+    4. 增加 go_home() 和 launch_app_from_desktop()，支持多应用批量测试。
     """
 
     def __init__(self, driver, app_name: str):
@@ -83,12 +83,6 @@ class AppiumTools:
 
         改为：
             一次性读取 driver.page_source，然后本地解析 XML。
-
-        返回：
-            texts: 当前页面所有可见文本
-            clickable_elements: 当前页面可点击元素，带 nearby_text
-            switches: 当前页面疑似开关控件
-            screenshot: 截图路径或 None
         """
 
         print("[get_page_info] 开始获取 page_source ...")
@@ -169,7 +163,6 @@ class AppiumTools:
                     inner_texts.append(tn["text"])
 
             nearby_text = " ".join(dict.fromkeys(inner_texts))
-
             position_hint = self.get_position_hint(item["bounds"])
 
             clickable_elements.append({
@@ -236,8 +229,7 @@ class AppiumTools:
     def _is_switch_like(self, class_name: str, checked):
         """
         更严格地判断一个控件是否是开关。
-        不要仅凭 checked=false 就认为它是开关，
-        因为很多普通控件也可能带 checked 属性。
+        不要仅凭 checked=false 就认为它是开关。
         """
         switch_keywords = [
             "Switch",
@@ -251,12 +243,7 @@ class AppiumTools:
     def click_by_id(self, element_id: int):
         """
         根据 get_page_info 返回的 element_id 点击元素。
-
         当前版本主要使用 bounds 中心点点击。
-        这样对以下情况更稳定：
-        1. 无文字图标，例如齿轮、三道横线、更多；
-        2. 整行 FrameLayout clickable=true，但 text 为空；
-        3. TextView 不可点，但父容器可点。
         """
 
         target = None
@@ -319,8 +306,9 @@ class AppiumTools:
     def back(self):
         """
         系统返回。
+        Android keycode 4 = BACK。
         """
-        self.driver.back()
+        self.driver.press_keycode(4)
         time.sleep(1)
         return {
             "success": True,
@@ -337,6 +325,93 @@ class AppiumTools:
         return {
             "success": True,
             "message": "已点击左上角返回坐标"
+        }
+
+    def go_home(self):
+        """
+        回到手机桌面。
+        Android keycode 3 = HOME。
+        等价于点击底部中间的系统 Home 键，比坐标点击更稳定。
+        """
+        self.driver.press_keycode(3)
+        time.sleep(1.5)
+        return {
+            "success": True,
+            "message": "已回到桌面"
+        }
+
+    def tap_bottom_home_button(self):
+        """
+        点击屏幕底部中间 Home 导航键。
+        仅作为兜底方案，不如 press_keycode(3) 稳定。
+        """
+        size = self.driver.get_window_size()
+        width = size["width"]
+        height = size["height"]
+
+        x = width // 2
+        y = int(height * 0.965)
+
+        self.driver.tap([(x, y)])
+        time.sleep(1.5)
+
+        return {
+            "success": True,
+            "message": f"已点击底部中间 Home 键坐标 ({x}, {y})"
+        }
+
+    def launch_app_from_desktop(self, app_display_name: str):
+        """
+        从桌面点击 App 图标启动应用。
+
+        要求：
+        1. 当前已经在桌面；
+        2. App 图标在当前桌面页面可见；
+        3. App 图标的 text、content-desc 或 nearby_text 能被 Appium 识别。
+        """
+
+        page_info = self.get_page_info(
+            step_name=f"desktop_find_{app_display_name}",
+            take_screenshot=False
+        )
+
+        clickable_elements = page_info.get("clickable_elements", [])
+
+        def get_name(item):
+            parts = [
+                item.get("text") or "",
+                item.get("content_desc") or "",
+                item.get("nearby_text") or ""
+            ]
+            return " ".join([p for p in parts if p and p != "null"])
+
+        # 1. 精确匹配优先
+        for item in clickable_elements:
+            name = get_name(item)
+            if name == app_display_name:
+                result = self.click_by_id(item["element_id"])
+                return {
+                    "success": result.get("success", False),
+                    "message": f"已从桌面点击 App：{app_display_name}",
+                    "clicked": item,
+                    "raw_result": result
+                }
+
+        # 2. 包含匹配
+        for item in clickable_elements:
+            name = get_name(item)
+            if app_display_name in name:
+                result = self.click_by_id(item["element_id"])
+                return {
+                    "success": result.get("success", False),
+                    "message": f"已从桌面点击疑似 App：{app_display_name}",
+                    "clicked": item,
+                    "raw_result": result
+                }
+
+        return {
+            "success": False,
+            "message": f"桌面当前页面没有找到 App 图标：{app_display_name}"
         }
 
     def scroll_down(self):
@@ -382,9 +457,7 @@ class AppiumTools:
     def toggle_switch(self, switch_id: int):
         """
         点击指定编号的开关，并检测 checked 状态是否变化。
-
-        当前阶段你主要验证 declared_path 是否走通；
-        这个函数暂时保留，后续验证真实开关时再加强。
+        当前阶段主要验证 declared_path 是否走通；这个函数暂时保留。
         """
         target = None
 
@@ -415,7 +488,6 @@ class AppiumTools:
         self.driver.tap([(x, y)])
         time.sleep(1.2)
 
-        # 点击后重新读取当前页面，尝试根据相同位置附近的开关状态判断变化
         new_page_info = self.get_page_info(take_screenshot=False)
         after = None
 

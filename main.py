@@ -18,6 +18,11 @@ ATTACH_CURRENT_PAGE = True
 # 关闭截图，避免 Appium screenshot 超时
 TAKE_SCREENSHOT = False
 
+# 多应用测试模式：
+# True  = 每个 App 测试前先回到桌面，再使用 package 启动 App
+# False = 不回桌面，不启动 App，直接接管当前页面继续
+LAUNCH_FROM_PACKAGE_AFTER_HOME = True
+
 
 def get_current_goal(task, history):
     """
@@ -25,9 +30,6 @@ def get_current_goal(task, history):
 
     规则：
     已经成功 click_by_id 几次，就认为路径推进了几步。
-    例如 declared_path = ["隐私管理", "系统权限管理"]
-    第 0 次点击前目标是：隐私管理
-    第 1 次点击后目标是：系统权限管理
     """
 
     declared_path = task.get("declared_path", [])
@@ -165,9 +167,8 @@ def find_explicit_goal_entry(page_info, current_goal):
     第一优先级：
     如果当前页面中存在显式 current_goal 入口，则直接返回对应元素。
 
-    重要：
-    对于“设置”这种短词，不能使用宽松 contains 匹配，
-    否则会把“点击设置昵称”“个人主页设置”误判为设置入口。
+    对“设置”做特殊处理：
+    不使用宽松 contains 匹配，避免把“点击设置昵称”“个人主页设置”误判为设置入口。
     """
 
     if not current_goal:
@@ -181,7 +182,7 @@ def find_explicit_goal_entry(page_info, current_goal):
         if name == current_goal:
             return item
 
-    # 2. 对“设置”进行特殊处理：不要 contains 匹配
+    # 2. “设置”是短词，不能 contains 匹配
     if current_goal == "设置":
         allowed_setting_names = {
             "设置",
@@ -196,11 +197,9 @@ def find_explicit_goal_entry(page_info, current_goal):
             if name in allowed_setting_names:
                 return item
 
-        # 如果没有显式设置入口，交给 special_hints
         return None
 
     # 3. 其他路径节点可以使用包含匹配
-    # 例如 “系统权限管理 为了提供更好的服务...” 可以匹配 “系统权限管理”
     for item in clickable_elements:
         name = element_name(item)
         if current_goal in name:
@@ -279,7 +278,7 @@ def make_forced_decision(task, page_info, current_goal):
     规则兜底决策。
 
     逻辑：
-    1. 如果页面中有显式 current_goal，例如“设置”“隐私管理”，直接点击；
+    1. 如果页面中有显式 current_goal，例如“我的”“设置”“隐私管理”，直接点击；
     2. 如果没有显式 current_goal，再查看 special_hints；
     3. 如果 special_hints 没有配置，则返回 None，交给 LLM。
     """
@@ -343,6 +342,20 @@ def make_forced_decision(task, page_info, current_goal):
 
     return None
 
+
+def get_successful_click_count(history):
+    count = 0
+
+    for item in history:
+        decision = item.get("decision", {})
+        result = item.get("result", {})
+
+        if decision.get("action") == "click_by_id" and result.get("success"):
+            count += 1
+
+    return count
+
+
 def run_task(task, agent):
     app_name = task["app_name"]
     package = task.get("package")
@@ -364,7 +377,25 @@ def run_task(task, agent):
     history = []
 
     try:
-        time.sleep(2)
+        time.sleep(1)
+
+        # 多应用批量测试：
+        # 每个 App 测试前先回到桌面，然后直接使用 package 启动 App。
+        if LAUNCH_FROM_PACKAGE_AFTER_HOME:
+            print("准备回到桌面...")
+            tools.go_home()
+            time.sleep(1.5)
+
+            print(f"准备使用 package 启动 App：{app_name} ({package})")
+
+            try:
+                driver.activate_app(package)
+                time.sleep(4)
+                print(f"App 启动成功：{app_name}")
+            except Exception as e:
+                raise RuntimeError(
+                    f"无法通过 package 启动 App：{app_name}，package={package}，错误：{str(e)}"
+                )
 
         for step_index in range(max_steps):
             current_goal = get_current_goal(task, history)
@@ -430,28 +461,19 @@ def run_task(task, agent):
 
             action = decision.get("action")
 
-            # 1. 如果 LLM 主动要求停止，则停止
             if action == "stop":
                 print("LLM 请求停止测试。")
                 break
 
-            # 2. 当前阶段：只要 declared_path 走完，就判定路径真实性验证成功
+            # 当前阶段：只要 declared_path 走完，就判定路径真实性验证成功
             declared_path = task.get("declared_path", [])
             stop_when_path_completed = task.get("stop_when_path_completed", True)
-
-            successful_clicks = 0
-            for item in history:
-                item_decision = item.get("decision", {})
-                item_result = item.get("result", {})
-
-                if item_decision.get("action") == "click_by_id" and item_result.get("success"):
-                    successful_clicks += 1
+            successful_clicks = get_successful_click_count(history)
 
             if stop_when_path_completed and successful_clicks >= len(declared_path):
                 print("声明路径已经走完，判定路径真实性验证成功，停止测试。")
                 break
 
-            # 3. 如果以后要验证真实开关，可保留这一条
             if action == "toggle_switch" and result.get("success"):
                 print("已经执行开关切换，结束核心验证。")
                 break
@@ -468,6 +490,13 @@ def run_task(task, agent):
         return final_result
 
     finally:
+        # 单个 App 结束后回到桌面，方便下一个 App 从桌面启动
+        try:
+            print("测试结束，准备回到桌面...")
+            tools.go_home()
+        except Exception:
+            pass
+
         try:
             driver.quit()
         except Exception:
