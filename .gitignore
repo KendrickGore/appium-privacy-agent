@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Conda / venv
+.venv/
+venv/
+env/
+.conda/
+
+# Secrets
+.env
+*.env
+
+# Results
+results/logs/
+results/screenshots/
+results/final_results.json
+
+# Large/generated files
+*.apk
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.mp4
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

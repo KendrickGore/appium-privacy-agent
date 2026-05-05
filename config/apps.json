@@ -1,0 +1,59 @@
+[
+  {
+    "app_name": "大众点评",
+    "package": "com.dianping.v1",
+    "activity": "com.dianping.v1.NovaMainActivity",
+    "right_type": "同意权",
+    "target_name": "个性化推荐开关",
+    "declared_path": ["我的", "设置", "隐私管理", "系统权限管理"],
+    "target_keywords": [
+      "我的",
+      "设置",
+      "隐私管理",
+      "系统权限管理",
+      "个性化推荐",
+      "个性化内容推荐",
+      "个性化广告",
+      "广告推荐",
+      "推荐管理",
+      "程序化广告",
+      "关闭",
+      "开启"
+    ],
+    "special_hints": {
+      "设置": {
+        "strategy": "top_right_icon",
+        "description": "大众点评我的页中，设置入口是右上角齿轮图标；不要点击“点击设置昵称”。"
+      }
+    },
+    "stop_when_path_completed": true,
+    "max_steps": 12
+  },
+  {
+    "app_name": "七猫免费小说",
+    "package": "com.kmxs.reader",
+    "activity": "com.kmxs.reader.home.ui.HomeActivity",
+    "right_type": "同意权",
+    "target_name": "个性化书籍推荐开关",
+    "declared_path": ["我的", "设置", "隐私设置"],
+    "target_keywords": [
+      "我的",
+      "设置",
+      "隐私设置",
+      "个性化书籍推荐",
+      "个性化推荐",
+      "书籍推荐",
+      "推荐设置",
+      "关闭",
+      "开启"
+    ],
+    "special_hints": {
+      "设置": {
+        "strategy": "top_right_icon",
+        "description": "七猫免费小说我的页中，设置入口可能是右上角齿轮或无文字图标。"
+      }
+    },
+    "stop_when_path_completed": true,
+    "max_steps": 12
+  }
+]
