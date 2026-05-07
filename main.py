@@ -1,5 +1,6 @@
 import time
 import re
+from copy import deepcopy
 
 from agent.llm_agent import LLMAgent
 from appium_runner.driver import create_driver, create_driver_attach_current
@@ -10,37 +11,34 @@ from utils.logger import TaskLogger
 
 
 # =========================
-# True  = 接管手机当前页面，不重新启动 App
-# False = 根据 package/activity 启动 App
+# True  = 接管手机当前页面，不重新启动 Appium session
+# False = 根据 package/activity 启动 Appium session
 # =========================
 ATTACH_CURRENT_PAGE = True
 
 # 关闭截图，避免 Appium screenshot 超时
 TAKE_SCREENSHOT = False
 
-# 多应用测试模式：
-# True  = 每个 App 测试前先回到桌面，再使用 package 启动 App
-# False = 不回桌面，不启动 App，直接接管当前页面继续
-LAUNCH_FROM_PACKAGE_AFTER_HOME = True
+# 不同 App 之间：先回桌面，再用 package 启动 App
+LAUNCH_APP_AFTER_HOME = True
+
+
+def get_successful_click_count(history):
+    count = 0
+    for item in history:
+        decision = item.get("decision", {})
+        result = item.get("result", {})
+        if decision.get("action") == "click_by_id" and result.get("success"):
+            count += 1
+    return count
 
 
 def get_current_goal(task, history):
     """
-    简单估计当前应该寻找 declared_path 中的哪一步。
-
-    规则：
-    已经成功 click_by_id 几次，就认为路径推进了几步。
+    根据已成功点击次数，估计当前应该寻找 declared_path 中的哪一步。
     """
-
     declared_path = task.get("declared_path", [])
-    success_clicks = 0
-
-    for record in history:
-        decision = record.get("decision", {})
-        result = record.get("result", {})
-
-        if decision.get("action") == "click_by_id" and result.get("success"):
-            success_clicks += 1
+    success_clicks = get_successful_click_count(history)
 
     if success_clicks < len(declared_path):
         return declared_path[success_clicks]
@@ -52,12 +50,12 @@ def summarize_result(task, history):
     """
     当前阶段的评价标准：
     只要智能体能够按照 declared_path 成功走完路径，
-    就认为该 App 声明的执行位置真实存在。
+    就认为该测试项声明的执行位置真实存在。
     """
-
     declared_path = task.get("declared_path", [])
 
     final = {
+        "test_name": task.get("test_name"),
         "app_name": task.get("app_name"),
         "target_name": task.get("target_name"),
         "declared_path": declared_path,
@@ -68,15 +66,7 @@ def summarize_result(task, history):
         "conclusion": ""
     }
 
-    successful_clicks = 0
-
-    for record in history:
-        decision = record.get("decision", {})
-        result = record.get("result", {})
-
-        if decision.get("action") == "click_by_id" and result.get("success"):
-            successful_clicks += 1
-
+    successful_clicks = get_successful_click_count(history)
     final["successful_clicks"] = successful_clicks
 
     if successful_clicks >= len(declared_path):
@@ -95,10 +85,6 @@ def summarize_result(task, history):
 
 
 def print_page_summary(page_info):
-    """
-    打印当前页面的简要信息，方便观察 LLM 决策依据。
-    """
-
     texts = page_info.get("texts", [])
     clickable_elements = page_info.get("clickable_elements", [])
     switches = page_info.get("switches", [])
@@ -117,15 +103,11 @@ def print_page_summary(page_info):
 
 
 def parse_bounds_for_main(bounds: str):
-    """
-    解析 Appium 返回的 bounds，例如 '[975,162][1051,238]'。
-    """
     nums = list(map(int, re.findall(r"\d+", bounds or "")))
     if len(nums) != 4:
         return None
 
     left, top, right, bottom = nums
-
     return {
         "left": left,
         "top": top,
@@ -137,19 +119,12 @@ def parse_bounds_for_main(bounds: str):
 
 
 def element_name(item):
-    """
-    综合 text、content_desc、nearby_text，得到元素语义名称。
-    """
     parts = [
         item.get("text") or "",
         item.get("content_desc") or "",
         item.get("nearby_text") or ""
     ]
-
-    return " ".join([
-        p for p in parts
-        if p and p != "null"
-    ])
+    return " ".join([p for p in parts if p and p != "null"])
 
 
 def make_click_decision(element_id, reason):
@@ -164,13 +139,11 @@ def make_click_decision(element_id, reason):
 
 def find_explicit_goal_entry(page_info, current_goal):
     """
-    第一优先级：
     如果当前页面中存在显式 current_goal 入口，则直接返回对应元素。
 
-    对“设置”做特殊处理：
-    不使用宽松 contains 匹配，避免把“点击设置昵称”“个人主页设置”误判为设置入口。
+    注意：
+    对“设置”这种短词，不使用 contains 匹配，避免误点“点击设置昵称”。
     """
-
     if not current_goal:
         return None
 
@@ -217,7 +190,6 @@ def choose_icon_by_position(page_info, position):
     - top_left
     - top_bar
     """
-
     clickable_elements = page_info.get("clickable_elements", [])
 
     parsed_items = []
@@ -243,7 +215,6 @@ def choose_icon_by_position(page_info, position):
         cx = pos["center_x"]
         cy = pos["center_y"]
 
-        # 顶部区域
         is_top = cy <= screen_bottom * 0.15
 
         if not is_top:
@@ -252,11 +223,9 @@ def choose_icon_by_position(page_info, position):
         if position == "top_right":
             if cx >= screen_right * 0.65:
                 candidates.append((item, pos))
-
         elif position == "top_left":
             if cx <= screen_right * 0.35:
                 candidates.append((item, pos))
-
         elif position == "top_bar":
             candidates.append((item, pos))
 
@@ -282,8 +251,6 @@ def make_forced_decision(task, page_info, current_goal):
     2. 如果没有显式 current_goal，再查看 special_hints；
     3. 如果 special_hints 没有配置，则返回 None，交给 LLM。
     """
-
-    # 第一优先级：显式入口
     explicit_entry = find_explicit_goal_entry(page_info, current_goal)
     if explicit_entry is not None:
         return make_click_decision(
@@ -291,7 +258,6 @@ def make_forced_decision(task, page_info, current_goal):
             f"页面中存在显式入口：{current_goal}，直接点击"
         )
 
-    # 第二优先级：special_hints
     special_hints = task.get("special_hints", {})
     hint = special_hints.get(current_goal)
 
@@ -343,26 +309,206 @@ def make_forced_decision(task, page_info, current_goal):
     return None
 
 
-def get_successful_click_count(history):
-    count = 0
+def return_by_click_count(tools, click_count):
+    """
+    同一个 App 的不同测试项之间：
+    本次 declared_path 成功点击了几次，就按几次系统返回键，
+    尽量回到本条测试路径开始前的 App 首页。
 
-    for item in history:
-        decision = item.get("decision", {})
-        result = item.get("result", {})
+    当前阶段不做 home_signals 判断，也不做 skip_back_count。
+    """
+    back_times = max(int(click_count or 0), 0)
 
-        if decision.get("action") == "click_by_id" and result.get("success"):
-            count += 1
+    print(f"准备按成功点击次数回退：{back_times} 次")
 
-    return count
+    for i in range(back_times):
+        try:
+            print(f"执行第 {i + 1}/{back_times} 次返回")
+            tools.back()
+            time.sleep(0.8)
+        except Exception as e:
+            print("系统返回失败，尝试左上角返回：", e)
+            try:
+                tools.tap_top_left_back()
+                time.sleep(0.8)
+            except Exception as e2:
+                print("左上角返回也失败：", e2)
+                return {
+                    "success": False,
+                    "message": f"第 {i + 1} 次返回失败：{str(e2)}",
+                    "back_times": i
+                }
+
+    return {
+        "success": True,
+        "message": f"已按成功点击次数返回 {back_times} 次",
+        "back_times": back_times
+    }
 
 
-def run_task(task, agent):
+def merge_app_and_test_config(app_config, consent_test):
+    """
+    将 App 层配置和单个 consent_test 配置合并成原 run_task 能识别的 task。
+    """
+    task = deepcopy(app_config)
+    task.pop("consent_tests", None)
+
+    app_hints = deepcopy(app_config.get("special_hints", {}))
+    test_hints = deepcopy(consent_test.get("special_hints", {}))
+    merged_hints = app_hints
+    merged_hints.update(test_hints)
+
+    task.update(consent_test)
+    task["special_hints"] = merged_hints
+    task["app_name"] = app_config.get("app_name")
+    task["package"] = app_config.get("package")
+    task["activity"] = app_config.get("activity")
+
+    if not task.get("test_name"):
+        task["test_name"] = task.get("target_name", "未命名测试项")
+
+    return task
+
+
+def run_single_consent_test(task, agent, tools, test_index):
+    """
+    执行单个同意权测试项。
+    该函数只负责执行路径，不负责回退。
+    回退由 run_app_tests() 根据 successful_clicks 统一处理。
+    """
     app_name = task["app_name"]
-    package = task.get("package")
-    activity = task.get("activity")
+    test_name = task.get("test_name", f"test_{test_index}")
     max_steps = task.get("max_steps", 10)
 
-    print(f"\n========== 开始测试：{app_name} ==========")
+    print(f"\n====== 开始测试项：{app_name} / {test_name} ======")
+
+    logger_name = f"{app_name}_{test_index}_{test_name}"
+    logger = TaskLogger(logger_name)
+    history = []
+
+    for step_index in range(max_steps):
+        current_goal = get_current_goal(task, history)
+
+        print(f"\n---------- {test_name} / Step {step_index} ----------")
+        print("当前目标：", current_goal)
+
+        page_info = tools.get_page_info(
+            step_name=f"{test_index}_{step_index}",
+            take_screenshot=TAKE_SCREENSHOT
+        )
+
+        print_page_summary(page_info)
+
+        forced_decision = make_forced_decision(
+            task=task,
+            page_info=page_info,
+            current_goal=current_goal
+        )
+
+        if forced_decision is not None:
+            decision = forced_decision
+            print("使用规则决策：", decision)
+        else:
+            try:
+                decision = agent.decide(
+                    task=task,
+                    page_info=page_info,
+                    history=history,
+                    current_goal=current_goal
+                )
+            except Exception as e:
+                decision = {
+                    "action": "stop",
+                    "element_id": None,
+                    "switch_id": None,
+                    "success": False,
+                    "reason": f"LLM 决策异常：{str(e)}"
+                }
+
+        print("LLM/规则决策：", decision)
+
+        try:
+            result = execute_action(decision, tools)
+        except Exception as e:
+            result = {
+                "success": False,
+                "message": f"动作执行异常：{str(e)}"
+            }
+
+        print("执行结果：", result)
+
+        record = {
+            "step_index": step_index,
+            "current_goal": current_goal,
+            "page_info": page_info,
+            "decision": decision,
+            "result": result
+        }
+
+        history.append(record)
+        logger.add_step(step_index, page_info, decision, result)
+
+        action = decision.get("action")
+
+        if action == "stop":
+            print("LLM 请求停止测试。")
+            break
+
+        declared_path = task.get("declared_path", [])
+        stop_when_path_completed = task.get("stop_when_path_completed", True)
+        successful_clicks = get_successful_click_count(history)
+
+        if stop_when_path_completed and successful_clicks >= len(declared_path):
+            print("声明路径已经走完，判定路径真实性验证成功，停止测试项。")
+            break
+
+        if action == "toggle_switch" and result.get("success"):
+            print("已经执行开关切换，结束当前测试项。")
+            break
+
+        time.sleep(1)
+
+    log_path = logger.save()
+    final_result = summarize_result(task, history)
+    final_result["log_path"] = log_path
+    final_result["test_index"] = test_index
+
+    print(f"\n====== 测试项结束：{app_name} / {test_name} ======")
+    print("测试项结果：", final_result)
+
+    return final_result
+
+
+def run_app_tests(app_config, agent):
+    """
+    执行一个 App 下的所有 consent_tests。
+
+    不同 App 之间：
+    - 回桌面
+    - package 启动
+
+    同一个 App 内不同测试项之间：
+    - 不重启 App
+    - 当前测试成功点击几次，就按几次返回键
+    """
+    app_name = app_config["app_name"]
+    package = app_config.get("package")
+    activity = app_config.get("activity")
+    consent_tests = app_config.get("consent_tests", [])
+
+    print(f"\n========== 开始测试 App：{app_name} ==========")
+
+    if not consent_tests:
+        # 兼容旧格式：如果没有 consent_tests，就把整个 app_config 当成一个测试项
+        consent_tests = [{
+            "test_name": app_config.get("target_name", "默认测试项"),
+            "right_type": app_config.get("right_type"),
+            "target_name": app_config.get("target_name"),
+            "declared_path": app_config.get("declared_path", []),
+            "target_keywords": app_config.get("target_keywords", []),
+            "max_steps": app_config.get("max_steps", 10),
+            "stop_when_path_completed": app_config.get("stop_when_path_completed", True)
+        }]
 
     if ATTACH_CURRENT_PAGE:
         print("运行模式：接管当前手机页面")
@@ -372,22 +518,23 @@ def run_task(task, agent):
         driver = create_driver(package, activity)
 
     tools = AppiumTools(driver, app_name)
-    logger = TaskLogger(app_name)
 
-    history = []
+    app_result = {
+        "app_name": app_name,
+        "package": package,
+        "activity": activity,
+        "tests": []
+    }
 
     try:
         time.sleep(1)
 
-        # 多应用批量测试：
-        # 每个 App 测试前先回到桌面，然后直接使用 package 启动 App。
-        if LAUNCH_FROM_PACKAGE_AFTER_HOME:
+        if LAUNCH_APP_AFTER_HOME:
             print("准备回到桌面...")
             tools.go_home()
             time.sleep(1.5)
 
             print(f"准备使用 package 启动 App：{app_name} ({package})")
-
             try:
                 driver.activate_app(package)
                 time.sleep(4)
@@ -397,102 +544,39 @@ def run_task(task, agent):
                     f"无法通过 package 启动 App：{app_name}，package={package}，错误：{str(e)}"
                 )
 
-        for step_index in range(max_steps):
-            current_goal = get_current_goal(task, history)
-
-            print(f"\n---------- Step {step_index} ----------")
-            print("当前目标：", current_goal)
-
-            page_info = tools.get_page_info(
-                step_name=f"step_{step_index}",
-                take_screenshot=TAKE_SCREENSHOT
-            )
-
-            print_page_summary(page_info)
-
-            forced_decision = make_forced_decision(
-                task=task,
-                page_info=page_info,
-                current_goal=current_goal
-            )
-
-            if forced_decision is not None:
-                decision = forced_decision
-                print("使用规则决策：", decision)
-            else:
-                try:
-                    decision = agent.decide(
-                        task=task,
-                        page_info=page_info,
-                        history=history,
-                        current_goal=current_goal
-                    )
-                except Exception as e:
-                    decision = {
-                        "action": "stop",
-                        "element_id": None,
-                        "switch_id": None,
-                        "success": False,
-                        "reason": f"LLM 决策异常：{str(e)}"
-                    }
-
-            print("LLM 决策：", decision)
+        for idx, consent_test in enumerate(consent_tests, start=1):
+            task = merge_app_and_test_config(app_config, consent_test)
 
             try:
-                result = execute_action(decision, tools)
+                test_result = run_single_consent_test(
+                    task=task,
+                    agent=agent,
+                    tools=tools,
+                    test_index=idx
+                )
+                app_result["tests"].append(test_result)
+
+                # 同一 App 内，测试项结束后，根据本次成功点击次数返回相同次数
+                successful_clicks = test_result.get("successful_clicks", 0)
+                return_result = return_by_click_count(tools, successful_clicks)
+                print("测试项结束后的回退结果：", return_result)
+
             except Exception as e:
-                result = {
-                    "success": False,
-                    "message": f"动作执行异常：{str(e)}"
-                }
+                app_result["tests"].append({
+                    "test_index": idx,
+                    "test_name": consent_test.get("test_name"),
+                    "target_name": consent_test.get("target_name"),
+                    "declared_path": consent_test.get("declared_path"),
+                    "error": str(e),
+                    "score": 0,
+                    "conclusion": "测试项执行过程中发生异常。"
+                })
 
-            print("执行结果：", result)
-
-            record = {
-                "step_index": step_index,
-                "current_goal": current_goal,
-                "page_info": page_info,
-                "decision": decision,
-                "result": result
-            }
-
-            history.append(record)
-            logger.add_step(step_index, page_info, decision, result)
-
-            action = decision.get("action")
-
-            if action == "stop":
-                print("LLM 请求停止测试。")
-                break
-
-            # 当前阶段：只要 declared_path 走完，就判定路径真实性验证成功
-            declared_path = task.get("declared_path", [])
-            stop_when_path_completed = task.get("stop_when_path_completed", True)
-            successful_clicks = get_successful_click_count(history)
-
-            if stop_when_path_completed and successful_clicks >= len(declared_path):
-                print("声明路径已经走完，判定路径真实性验证成功，停止测试。")
-                break
-
-            if action == "toggle_switch" and result.get("success"):
-                print("已经执行开关切换，结束核心验证。")
-                break
-
-            time.sleep(1)
-
-        log_path = logger.save()
-        final_result = summarize_result(task, history)
-        final_result["log_path"] = log_path
-
-        print("\n========== 单个 App 测试结束 ==========")
-        print("最终结果：", final_result)
-
-        return final_result
+        return app_result
 
     finally:
-        # 单个 App 结束后回到桌面，方便下一个 App 从桌面启动
         try:
-            print("测试结束，准备回到桌面...")
+            print(f"App 测试结束，准备回到桌面：{app_name}")
             tools.go_home()
         except Exception:
             pass
@@ -509,17 +593,17 @@ def main():
 
     final_results = []
 
-    for task in apps:
+    for app_config in apps:
         try:
-            result = run_task(task, agent)
-            final_results.append(result)
+            app_result = run_app_tests(app_config, agent)
+            final_results.append(app_result)
         except Exception as e:
             final_results.append({
-                "app_name": task.get("app_name"),
-                "target_name": task.get("target_name"),
+                "app_name": app_config.get("app_name"),
+                "package": app_config.get("package"),
                 "error": str(e),
-                "score": 0,
-                "conclusion": "测试过程中发生异常。"
+                "tests": [],
+                "conclusion": "App 测试过程中发生异常。"
             })
 
     save_json(final_results, "results/final_results.json")
